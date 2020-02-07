@@ -59,6 +59,16 @@ type PodDefaultSpec struct {
 
 	// Labels defines the labels to inject into the pod.
 	Labels map[string]string `json:"labels,omitempty"`
+
+	// NodeSelector defines the nodeselect to inject into the pod.
+	NodeSelector map[string]string `json:"nodeSelector,omitempty"`
+
+	// HostAlias defines the host names to inject into the pod.
+	HostAlias []v1.HostAlias `json:"hostAliases,omitempty"`
+
+	// Toleration defines the tolerations to inject inot the pod.
+	Toleration []v1.Toleration `json:"tolerations,omitempty"`
+
 }
 
 // PodDefaultStatus defines the observed state of PodDefault
