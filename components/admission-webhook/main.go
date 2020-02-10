@@ -103,6 +103,15 @@ func safeToApplyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.Pod
 	if _, err := mergeVolumes(pod.Spec.Volumes, podDefaults); err != nil {
 		errs = append(errs, err)
 	}
+
+	if _, err := mergeToleration(pod.Toleration, podDefaults); err != nil {
+		errs = append(errs, err)
+	}
+
+	if _, err := mergeHostAlias(pod.HostAlias, podDefaults); err != nil {
+		errs = append(errs, err)
+	}
+
 	for _, ctr := range pod.Spec.Containers {
 		if err := safeToApplyPodDefaultsOnContainer(&ctr, podDefaults); err != nil {
 			errs = append(errs, err)
@@ -110,17 +119,24 @@ func safeToApplyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.Pod
 	}
 
 	var (
-		defaultAnnotations = make([]*map[string]string, len(podDefaults))
-		defaultLabels      = make([]*map[string]string, len(podDefaults))
+		defaultAnnotations  = make([]*map[string]string, len(podDefaults))
+		defaultLabels       = make([]*map[string]string, len(podDefaults))
+		defaultNodeSelector = make([]*map[string]string, len(podDefaults))
 	)
 	for i, pd := range podDefaults {
 		defaultAnnotations[i] = &pd.Spec.Annotations
 		defaultLabels[i] = &pd.Spec.Labels
+		defaultNodeSelector[i] = &pd.Spec.NodeSelector
 	}
 	if _, err := mergeMap(pod.Annotations, defaultAnnotations); err != nil {
 		errs = append(errs, err)
 	}
+
 	if _, err := mergeMap(pod.Labels, defaultLabels); err != nil {
+		errs = append(errs, err)
+	}
+
+	if _, err := mergeMap(pod.NodeSelector, defaultLabels); err != nil {
 		errs = append(errs, err)
 	}
 	return utilerrors.NewAggregate(errs)
@@ -140,6 +156,84 @@ func safeToApplyPodDefaultsOnContainer(ctr *corev1.Container, podDefaults []*set
 	}
 
 	return utilerrors.NewAggregate(errs)
+}
+
+// mergeToleration merges a list of Tolerations with the Tolerations injected by given list podDefaults.
+// It returns an error if it detects any conflict during the merge.
+func mergeToleration(tolerations []corev1.Toleration, podDefaults []*settingsapi.PodDefault) ([]corev1.Toleration, error) {
+	origToleration := map[string]corev1.Toleration{}
+	for _, v := range tolerations {
+		origToleration[v.Key] = v
+	}
+
+	mergedToleration := make([]corev1.Toleration, len(tolerations))
+	copy(mergedToleration, tolerations)
+
+	var errs []error
+
+	for _, pd := range podDefaults {
+		for _, v := range pd.Spec.Toleration {
+			found, ok := origToleration[v.Key]
+			if !ok {
+				// if we don't already have it append it and continue
+				origToleration[v.Key] = v
+				mergedToleration = append(mergedToleration, v)
+				continue
+			}
+
+			// make sure they are identical or throw an error
+			if !reflect.DeepEqual(found, v) {
+				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.Name, v, found))
+			}
+		}
+	}
+
+	err := utilerrors.NewAggregate(errs)
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	return mergedToleration, err
+}
+
+// mergeHostAlias merges a list of Host Aliases with the Host Aliases injected by given list podDefaults.
+// It returns an error if it detects any conflict during the merge.
+func mergeHostAlias(hostAliases []corev1.HostAlias, podDefaults []*settingsapi.PodDefault) ([]corev1.HostAlias, error) {
+	origHost := map[string]corev1.HostAlias{}
+	for _, v := range hostAliases {
+		origHost[v.IP] = v
+	}
+
+	mergedHost := make([]corev1.HostAlias, len(hostAliases))
+	copy(mergedHost, hostAliases)
+
+	var errs []error
+
+	for _, pd := range podDefaults {
+		for _, v := range pd.Spec.HostAlias {
+			found, ok := origHost[v.IP]
+			if !ok {
+				// if we don't already have it append it and continue
+				origHost[v.IP] = v
+				mergedHost = append(mergedHost, v)
+				continue
+			}
+
+			// make sure they are identical or throw an error
+			if !reflect.DeepEqual(found, v) {
+				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.Name, v, found))
+			}
+		}
+	}
+
+	err := utilerrors.NewAggregate(errs)
+	if err != nil {
+		klog.Error(err)
+		return nil, err
+	}
+
+	return mergedHost, err
 }
 
 // mergeEnv merges a list of env vars with the env vars injected by given list podDefaults.
@@ -331,19 +425,39 @@ func applyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.PodDefaul
 	}
 	pod.Spec.Volumes = volumes
 
+	tolerations, err := mergeToleration(pod.Spec.Tolerations, podDefaults)
+	if err != nil {
+		klog.Error(err)
+	}
+	pod.Spec.Tolerations = toleration
+
+	hostAliases, err := mergeHostAlias(pod.Spec.HostAliases, podDefaults)
+	if err != nil {
+		klog.Error(err)
+	}
+	pod.Spec.HostAliases = hostAliases
+
 	var (
-		defaultAnnotations = make([]*map[string]string, len(podDefaults))
-		defaultLabels      = make([]*map[string]string, len(podDefaults))
+		defaultAnnotations  = make([]*map[string]string, len(podDefaults))
+		defaultLabels       = make([]*map[string]string, len(podDefaults))
+		defaultNodeSelector = make([]*map[string]string, len(podDefaults))
 	)
 	for i, pd := range podDefaults {
 		defaultAnnotations[i] = &pd.Spec.Annotations
 		defaultLabels[i] = &pd.Spec.Labels
+		defaultNodeSelector[i] = &pd.Spec.NodeSelector
 	}
 	annotations, err := mergeMap(pod.Annotations, defaultAnnotations)
 	if err != nil {
 		klog.Error(err)
 	}
 	pod.ObjectMeta.Annotations = annotations
+
+	nodeSelectors, err := mergeMap(pod.NodeSelectors, defaultNodeSelector)
+	if err != nil {
+		klog.Error(err)
+	}
+	pod.ObjectMeta.NodeSelectors = nodeSelectors
 
 	labels, err := mergeMap(pod.Labels, defaultLabels)
 	if err != nil {
