@@ -104,11 +104,11 @@ func safeToApplyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.Pod
 		errs = append(errs, err)
 	}
 
-	if _, err := mergeToleration(pod.Toleration, podDefaults); err != nil {
+	if _, err := mergeToleration(pod.Spec.Tolerations, podDefaults); err != nil {
 		errs = append(errs, err)
 	}
 
-	if _, err := mergeHostAlias(pod.HostAlias, podDefaults); err != nil {
+	if _, err := mergeHostAlias(pod.Spec.HostAliases, podDefaults); err != nil {
 		errs = append(errs, err)
 	}
 
@@ -136,7 +136,7 @@ func safeToApplyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.Pod
 		errs = append(errs, err)
 	}
 
-	if _, err := mergeMap(pod.NodeSelector, defaultLabels); err != nil {
+	if _, err := mergeMap(pod.Spec.NodeSelector, defaultNodeSelector); err != nil {
 		errs = append(errs, err)
 	}
 	return utilerrors.NewAggregate(errs)
@@ -183,7 +183,7 @@ func mergeToleration(tolerations []corev1.Toleration, podDefaults []*settingsapi
 
 			// make sure they are identical or throw an error
 			if !reflect.DeepEqual(found, v) {
-				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.Name, v, found))
+				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.Key, v, found))
 			}
 		}
 	}
@@ -222,7 +222,7 @@ func mergeHostAlias(hostAliases []corev1.HostAlias, podDefaults []*settingsapi.P
 
 			// make sure they are identical or throw an error
 			if !reflect.DeepEqual(found, v) {
-				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.Name, v, found))
+				errs = append(errs, fmt.Errorf("merging env for %s has a conflict on %s: \n%#v\ndoes not match\n%#v\n in container", pd.GetName(), v.IP, v, found))
 			}
 		}
 	}
@@ -429,7 +429,7 @@ func applyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.PodDefaul
 	if err != nil {
 		klog.Error(err)
 	}
-	pod.Spec.Tolerations = toleration
+	pod.Spec.Tolerations = tolerations
 
 	hostAliases, err := mergeHostAlias(pod.Spec.HostAliases, podDefaults)
 	if err != nil {
@@ -453,11 +453,11 @@ func applyPodDefaultsOnPod(pod *corev1.Pod, podDefaults []*settingsapi.PodDefaul
 	}
 	pod.ObjectMeta.Annotations = annotations
 
-	nodeSelectors, err := mergeMap(pod.NodeSelectors, defaultNodeSelector)
+	nodeSelector, err := mergeMap(pod.Spec.NodeSelector, defaultNodeSelector)
 	if err != nil {
 		klog.Error(err)
 	}
-	pod.ObjectMeta.NodeSelectors = nodeSelectors
+	pod.Spec.NodeSelector = nodeSelector
 
 	labels, err := mergeMap(pod.Labels, defaultLabels)
 	if err != nil {
