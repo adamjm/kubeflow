@@ -165,46 +165,45 @@ func (c *BindingClient) Delete(binding *Binding) error {
 
 func (c *BindingClient) List(user string, namespaces []string, role string) (*BindingEntries, error) {
 	bindings := []Binding{}
-	for _, ns := range namespaces {
-		roleBindingList, err := c.kubeClient.RbacV1().RoleBindings(ns).List(metav1.ListOptions{})
-		if err != nil {
-			return nil, err
+	roleBindingList, err := c.kubeClient.RbacV1().RoleBindings("").List(metav1.ListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	for _, roleBinding := range roleBindingList.Items {
+		userVal, ok := roleBinding.Annotations[USER]
+		if !ok {
+			continue
 		}
-		for _, roleBinding := range roleBindingList.Items {
-			userVal, ok := roleBinding.Annotations[USER]
-			if !ok {
-				continue
-			}
-			if user != "" && user != userVal {
-				continue
-			}
-			roleVal, ok := roleBinding.Annotations[ROLE]
-			if !ok {
-				continue
-			}
-			if role != "" && role != roleVal {
-				continue
-			}
-			if len(roleBinding.Subjects) != 1 {
-				return nil, fmt.Errorf("binding subject length not equal to 1, actual length: %v",
-					len(roleBinding.Subjects))
-			}
-			binding := Binding{
-				User:
-					&rbacv1.Subject{
-						Kind: roleBinding.Subjects[0].Kind,
-						Name: roleBinding.Subjects[0].Name,
+		if user != "" && user != userVal {
+			continue
+		}
+		roleVal, ok := roleBinding.Annotations[ROLE]
+		if !ok {
+			continue
+		}
+		if role != "" && role != roleVal {
+			continue
+		}
+		ns, ok := roleBinding.Metadata.Namespace
+		if len(roleBinding.Subjects) != 1 {
+			return nil, fmt.Errorf("binding subject length not equal to 1, actual length: %v",
+				len(roleBinding.Subjects))
+		}
+		binding := Binding{
+			User:
+				&rbacv1.Subject{
+					Kind: roleBinding.Subjects[0].Kind,
+					Name: roleBinding.Subjects[0].Name,
 
-					},
-				ReferredNamespace: 	ns,
-				RoleRef:
-					&rbacv1.RoleRef{
-						Kind: roleBinding.RoleRef.Kind,
-						Name: roleBindingNameMap[roleBinding.RoleRef.Name],
-					},
-			}
-			bindings = append(bindings, binding)
+				},
+			ReferredNamespace: 	ns,
+			RoleRef:
+				&rbacv1.RoleRef{
+					Kind: roleBinding.RoleRef.Kind,
+					Name: roleBindingNameMap[roleBinding.RoleRef.Name],
+				},
 		}
+		bindings = append(bindings, binding)
 	}
 	return &BindingEntries{
 		Bindings: bindings,
