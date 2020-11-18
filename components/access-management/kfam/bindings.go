@@ -184,7 +184,7 @@ func (c *BindingClient) List(user string, namespaces []string, role string) (*Bi
 		if role != "" && role != roleVal {
 			continue
 		}
-		ns, ok := roleBinding.Metadata.Namespace
+		ns := roleBinding.ObjectMeta.Namespace
 		if len(roleBinding.Subjects) != 1 {
 			return nil, fmt.Errorf("binding subject length not equal to 1, actual length: %v",
 				len(roleBinding.Subjects))
