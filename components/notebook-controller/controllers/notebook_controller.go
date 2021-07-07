@@ -17,6 +17,7 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -28,7 +29,6 @@ import (
 	"github.com/kubeflow/kubeflow/components/notebook-controller/pkg/metrics"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	v1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -47,6 +47,8 @@ import (
 
 const DefaultContainerPort = 8888
 const DefaultServingPort = 80
+const AnnotationRewriteURI = "notebooks.kubeflow.org/http-rewrite-uri"
+const AnnotationHeadersRequestSet = "notebooks.kubeflow.org/http-headers-request-set"
 
 // The default fsGroup of PodSecurityContext.
 // https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.11/#podsecuritycontext-v1-core
@@ -73,22 +75,28 @@ type NotebookReconciler struct {
 	EventRecorder record.EventRecorder
 }
 
-// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=statefulsets/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=core,resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=services/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups=core,resources=events,verbs=get;list;watch;create
+// +kubebuilder:rbac:groups=core,resources=services,verbs="*"
+// +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs="*"
+// +kubebuilder:rbac:groups=kubeflow.org,resources=notebooks;notebooks/status;notebooks/finalizers,verbs="*"
+// +kubebuilder:rbac:groups="networking.istio.io",resources=virtualservices,verbs="*"
+
 func (r *NotebookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	log := r.Log.WithValues("notebook", req.NamespacedName)
 
-	event := &v1.Event{}
+	// TODO(yanniszark): Can we avoid reconciling Events and Notebook in the same queue?
+	event := &corev1.Event{}
 	var getEventErr error
 	getEventErr = r.Get(ctx, req.NamespacedName, event)
 	if getEventErr == nil {
 		involvedNotebook := &v1beta1.Notebook{}
-		involvedNotebookKey := types.NamespacedName{Name: nbNameFromInvolvedObject(&event.InvolvedObject), Namespace: req.Namespace}
+		nbName, err := nbNameFromInvolvedObject(r.Client, &event.InvolvedObject)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		involvedNotebookKey := types.NamespacedName{Name: nbName, Namespace: req.Namespace}
 		if err := r.Get(ctx, involvedNotebookKey, involvedNotebook); err != nil {
 			log.Error(err, "unable to fetch Notebook by looking at event")
 			return ctrl.Result{}, ignoreNotFound(err)
@@ -201,23 +209,42 @@ func (r *NotebookReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	} else {
 		// Got the pod
 		podFound = true
-		if len(pod.Status.ContainerStatuses) > 0 &&
-			pod.Status.ContainerStatuses[0].State != instance.Status.ContainerState {
-			log.Info("Updating container state: ", "namespace", instance.Namespace, "name", instance.Name)
-			cs := pod.Status.ContainerStatuses[0].State
-			instance.Status.ContainerState = cs
-			oldConditions := instance.Status.Conditions
-			newCondition := getNextCondition(cs)
-			// Append new condition
-			if len(oldConditions) == 0 || oldConditions[0].Type != newCondition.Type ||
-				oldConditions[0].Reason != newCondition.Reason ||
-				oldConditions[0].Message != newCondition.Message {
-				log.Info("Appending to conditions: ", "namespace", instance.Namespace, "name", instance.Name, "type", newCondition.Type, "reason", newCondition.Reason, "message", newCondition.Message)
-				instance.Status.Conditions = append([]v1beta1.NotebookCondition{newCondition}, oldConditions...)
+
+		// Update status of the CR using the ContainerState of
+		// the container that has the same name as the CR.
+		// If no container of same name is found, the state of the CR is not updated.
+		if len(pod.Status.ContainerStatuses) > 0 {
+			notebookContainerFound := false
+			for i := range pod.Status.ContainerStatuses {
+				if pod.Status.ContainerStatuses[i].Name != instance.Name {
+					continue
+				}
+				if pod.Status.ContainerStatuses[i].State == instance.Status.ContainerState {
+					continue
+				}
+
+				log.Info("Updating Notebook CR state: ", "namespace", instance.Namespace, "name", instance.Name)
+				cs := pod.Status.ContainerStatuses[i].State
+				instance.Status.ContainerState = cs
+				oldConditions := instance.Status.Conditions
+				newCondition := getNextCondition(cs)
+				// Append new condition
+				if len(oldConditions) == 0 || oldConditions[0].Type != newCondition.Type ||
+					oldConditions[0].Reason != newCondition.Reason ||
+					oldConditions[0].Message != newCondition.Message {
+					log.Info("Appending to conditions: ", "namespace", instance.Namespace, "name", instance.Name, "type", newCondition.Type, "reason", newCondition.Reason, "message", newCondition.Message)
+					instance.Status.Conditions = append([]v1beta1.NotebookCondition{newCondition}, oldConditions...)
+				}
+				err = r.Status().Update(ctx, instance)
+				if err != nil {
+					return ctrl.Result{}, err
+				}
+				notebookContainerFound = true
+				break
+
 			}
-			err = r.Status().Update(ctx, instance)
-			if err != nil {
-				return ctrl.Result{}, err
+			if !notebookContainerFound {
+				log.Error(nil, "Could not find the Notebook container, will not update the status of the CR. No container has the same name as the CR.", "CR name:", instance.Name)
 			}
 		}
 	}
@@ -322,10 +349,17 @@ func generateStatefulSet(instance *v1beta1.Notebook) *appsv1.StatefulSet {
 		Name:  "NB_PREFIX",
 		Value: "/notebook/" + instance.Namespace + "/" + instance.Name,
 	})
-	if podSpec.SecurityContext == nil {
-		fsGroup := DefaultFSGroup
-		podSpec.SecurityContext = &corev1.PodSecurityContext{
-			FSGroup: &fsGroup,
+
+	// For some platforms (like OpenShift), adding fsGroup: 100 is troublesome.
+	// This allows for those platforms to bypass the automatic addition of the fsGroup
+	// and will allow for the Pod Security Policy controller to make an appropriate choice
+	// https://github.com/kubernetes-sigs/controller-runtime/issues/4617
+	if value, exists := os.LookupEnv("ADD_FSGROUP"); !exists || value == "true" {
+		if podSpec.SecurityContext == nil {
+			fsGroup := DefaultFSGroup
+			podSpec.SecurityContext = &corev1.PodSecurityContext{
+				FSGroup: &fsGroup,
+			}
 		}
 	}
 	return ss
@@ -367,10 +401,25 @@ func virtualServiceName(kfName string, namespace string) string {
 func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructured, error) {
 	name := instance.Name
 	namespace := instance.Namespace
+	clusterDomain := "cluster.local"
 	prefix := fmt.Sprintf("/notebook/%s/%s/", namespace, name)
+
+	// unpack annotations from Notebook resource
+	annotations := make(map[string]string)
+	for k, v := range instance.ObjectMeta.Annotations {
+		annotations[k] = v
+	}
+
 	rewrite := fmt.Sprintf("/notebook/%s/%s/", namespace, name)
-	// TODO(gabrielwen): Make clusterDomain an option.
-	service := fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
+	// If AnnotationRewriteURI is present, use this value for "rewrite"
+	if _, ok := annotations[AnnotationRewriteURI]; ok && len(annotations[AnnotationRewriteURI]) > 0 {
+		rewrite = annotations[AnnotationRewriteURI]
+	}
+
+	if clusterDomainFromEnv, ok := os.LookupEnv("CLUSTER_DOMAIN"); ok {
+		clusterDomain = clusterDomainFromEnv
+	}
+	service := fmt.Sprintf("%s.%s.svc.%s", name, namespace, clusterDomain)
 
 	vsvc := &unstructured.Unstructured{}
 	vsvc.SetAPIVersion("networking.istio.io/v1alpha3")
@@ -390,8 +439,29 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 		return nil, fmt.Errorf("Set .spec.gateways error: %v", err)
 	}
 
+	headersRequestSet := make(map[string]string)
+	// If AnnotationHeadersRequestSet is present, use its values in "headers.request.set"
+	if _, ok := annotations[AnnotationHeadersRequestSet]; ok && len(annotations[AnnotationHeadersRequestSet]) > 0 {
+		requestHeadersBytes := []byte(annotations[AnnotationHeadersRequestSet])
+		if err := json.Unmarshal(requestHeadersBytes, &headersRequestSet); err != nil {
+			// if JSON decoding fails, set an empty map
+			headersRequestSet = make(map[string]string)
+		}
+	}
+	// cast from map[string]string, as SetNestedSlice needs map[string]interface{}
+	headersRequestSetInterface := make(map[string]interface{})
+	for key, element := range headersRequestSet {
+		headersRequestSetInterface[key] = element
+	}
+
+	// the http section of the istio VirtualService spec
 	http := []interface{}{
 		map[string]interface{}{
+			"headers": map[string]interface{}{
+				"request": map[string]interface{}{
+					"set": headersRequestSetInterface,
+				},
+			},
 			"match": []interface{}{
 				map[string]interface{}{
 					"uri": map[string]interface{}{
@@ -415,6 +485,8 @@ func generateVirtualService(instance *v1beta1.Notebook) (*unstructured.Unstructu
 			"timeout": "300s",
 		},
 	}
+
+	// add http section to istio VirtualService spec
 	if err := unstructured.SetNestedSlice(vsvc.Object, http, "spec", "http"); err != nil {
 		return nil, fmt.Errorf("Set .spec.http error: %v", err)
 	}
@@ -460,16 +532,34 @@ func (r *NotebookReconciler) reconcileVirtualService(instance *v1beta1.Notebook)
 	return nil
 }
 
-func isStsOrPodEvent(event *v1.Event) bool {
+func isStsOrPodEvent(event *corev1.Event) bool {
 	return event.InvolvedObject.Kind == "Pod" || event.InvolvedObject.Kind == "StatefulSet"
 }
 
-func nbNameFromInvolvedObject(object *v1.ObjectReference) string {
-	nbName := object.Name
-	if object.Kind == "Pod" {
-		nbName = nbName[:strings.LastIndex(nbName, "-")]
+func nbNameFromInvolvedObject(c client.Client, object *corev1.ObjectReference) (string, error) {
+	name, namespace := object.Name, object.Namespace
+
+	if object.Kind == "StatefulSet" {
+		return name, nil
 	}
-	return nbName
+	if object.Kind == "Pod" {
+		pod := &corev1.Pod{}
+		err := c.Get(
+			context.TODO(),
+			types.NamespacedName{
+				Namespace: namespace,
+				Name:      name,
+			},
+			pod,
+		)
+		if err != nil {
+			return "", err
+		}
+		if nbName, ok := pod.Labels["notebook-name"]; ok {
+			return nbName, nil
+		}
+	}
+	return "", fmt.Errorf("object isn't related to a Notebook")
 }
 
 func nbNameExists(client client.Client, nbName string, namespace string) bool {
@@ -538,15 +628,23 @@ func (r *NotebookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	eventsPredicates := predicate.Funcs{
 		UpdateFunc: func(e event.UpdateEvent) bool {
-			event := e.ObjectNew.(*v1.Event)
+			event := e.ObjectNew.(*corev1.Event)
+			nbName, err := nbNameFromInvolvedObject(r.Client, &event.InvolvedObject)
+			if err != nil {
+				return false
+			}
 			return e.ObjectOld != e.ObjectNew &&
 				isStsOrPodEvent(event) &&
-				nbNameExists(r.Client, nbNameFromInvolvedObject(&event.InvolvedObject), e.MetaNew.GetNamespace())
+				nbNameExists(r.Client, nbName, e.MetaNew.GetNamespace())
 		},
 		CreateFunc: func(e event.CreateEvent) bool {
-			event := e.Object.(*v1.Event)
+			event := e.Object.(*corev1.Event)
+			nbName, err := nbNameFromInvolvedObject(r.Client, &event.InvolvedObject)
+			if err != nil {
+				return false
+			}
 			return isStsOrPodEvent(event) &&
-				nbNameExists(r.Client, nbNameFromInvolvedObject(&event.InvolvedObject), e.Meta.GetNamespace())
+				nbNameExists(r.Client, nbName, e.Meta.GetNamespace())
 		},
 	}
 
@@ -560,7 +658,7 @@ func (r *NotebookReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	}
 
 	if err = c.Watch(
-		&source.Kind{Type: &v1.Event{}},
+		&source.Kind{Type: &corev1.Event{}},
 		&handler.EnqueueRequestsFromMapFunc{
 			ToRequests: eventToRequest,
 		},

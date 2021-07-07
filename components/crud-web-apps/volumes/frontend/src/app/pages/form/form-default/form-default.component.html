@@ -1,0 +1,80 @@
+<div class="form--container" mat-dialog-content>
+  <form novalidate (ngSubmit)="onSubmit()" [formGroup]="formCtrl">
+    <lib-form-section
+      title="{{ 'volume.newVolume' | translate }}"
+      text="{{ 'volume.form.createNewEmptyVolume' | translate }}"
+      icon="fa:fas:hdd"
+    >
+    </lib-form-section>
+
+    <!--Name / Namespace-->
+    <lib-form-name-namespace-inputs
+      [nameControl]="formCtrl.get('name')"
+      [namespaceControl]="formCtrl.get('namespace')"
+      resourceName="volume.volume"
+      [existingNames]="pvcNames"
+    >
+    </lib-form-name-namespace-inputs>
+
+    <!--Snapshot Chooser-->
+    <mat-form-field
+      *ngIf="formCtrl.get('type').value === 'snapshot'"
+      appearance="outline"
+      class="wide"
+    >
+      <mat-label>{{ 'volume.form.snapshot' | translate }}</mat-label>
+      <mat-select formControlName="snapshot"> </mat-select>
+    </mat-form-field>
+
+    <!--Size-->
+    <lib-positive-number-input
+      [sizeControl]="formCtrl.get('size')"
+      min="1"
+      step="1"
+      label="{{ 'volume.form.volumeSizeGi' | translate }}"
+    ></lib-positive-number-input>
+
+    <!--Storage Class-->
+    <mat-form-field appearance="outline" class="wide">
+      <mat-label>{{ 'volume.storageClass' | translate }}</mat-label>
+      <mat-select formControlName="class">
+        <mat-option value="{none}">
+          {{ 'common.optNone' | translate }}
+        </mat-option>
+        <mat-option *ngFor="let sc of storageClasses" [value]="sc">
+          {{ sc }}
+        </mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    <!--Access Mode-->
+    <mat-form-field appearance="outline" class="wide">
+      <mat-label>{{ 'volume.accessMode' | translate }}</mat-label>
+      <mat-select formControlName="mode">
+        <mat-option value="ReadWriteOnce">
+          {{ 'common.optReadWriteOnce' | translate }}
+        </mat-option>
+        <mat-option value="ReadOnlyMany">
+          {{ 'common.optReadOnlyMany' | translate }}
+        </mat-option>
+        <mat-option value="ReadWriteMany">
+          {{ 'common.optReadWriteMany' | translate }}
+        </mat-option>
+      </mat-select>
+    </mat-form-field>
+
+    <button
+      mat-raised-button
+      color="primary"
+      class="form--button-margin"
+      type="submit"
+      [disabled]="!formCtrl.valid || blockSubmit"
+    >
+      {{ 'common.createCaps' | translate }}
+    </button>
+
+    <button mat-raised-button type="button" (click)="onCancel()">
+      {{ 'common.cancelCaps' | translate }}
+    </button>
+  </form>
+</div>

@@ -72,6 +72,11 @@ func TestMergeMapGood(t *testing.T) {
 	}
 }
 
+func newTrue() *bool {
+	b := true
+	return &b
+}
+
 func TestApplyPodDefaultsOnPod(t *testing.T) {
 	for _, test := range []struct {
 		name        string
@@ -90,6 +95,8 @@ func TestApplyPodDefaultsOnPod(t *testing.T) {
 				{
 					Spec: settingsapi.PodDefaultSpec{
 						Annotations: map[string]string{"baz": "bux"},
+						ServiceAccountName: "some-service-account",
+						AutomountServiceAccountToken: newTrue(),
 					},
 				},
 			},
@@ -101,6 +108,10 @@ func TestApplyPodDefaultsOnPod(t *testing.T) {
 						"poddefault.admission.kubeflow.org/poddefault-": "",
 					},
 					Labels: map[string]string{},
+				},
+				Spec: corev1.PodSpec{
+					ServiceAccountName: "some-service-account",
+					AutomountServiceAccountToken: newTrue(),
 				},
 			},
 		}, {
@@ -124,6 +135,56 @@ func TestApplyPodDefaultsOnPod(t *testing.T) {
 						"poddefault.admission.kubeflow.org/poddefault-": "",
 					},
 					Labels: map[string]string{},
+				},
+			},
+		}, {
+			"Add tolerations",
+			&corev1.Pod{
+				Spec: corev1.PodSpec{
+					Tolerations: []corev1.Toleration{
+						{
+							Key:      "oldToleration",
+							Operator: "Exists",
+							Effect:   "NoSchedule",
+						},
+					},
+				},
+			},
+			[]*settingsapi.PodDefault{
+				{
+					Spec: settingsapi.PodDefaultSpec{
+						Tolerations: []corev1.Toleration{
+							{
+								Key:      "newToleration",
+								Operator: "Equal",
+								Value:    "foo",
+								Effect:   "NoSchedule",
+							},
+						},
+					},
+				},
+			},
+			&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"poddefault.admission.kubeflow.org/poddefault-": "",
+					},
+					Labels: map[string]string{},
+				},
+				Spec: corev1.PodSpec{
+					Tolerations: []corev1.Toleration{
+						{
+							Key:      "oldToleration",
+							Operator: "Exists",
+							Effect:   "NoSchedule",
+						},
+						{
+							Key:      "newToleration",
+							Operator: "Equal",
+							Value:    "foo",
+							Effect:   "NoSchedule",
+						},
+					},
 				},
 			},
 		},

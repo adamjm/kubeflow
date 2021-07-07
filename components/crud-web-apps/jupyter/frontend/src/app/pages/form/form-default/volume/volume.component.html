@@ -1,0 +1,52 @@
+<div *ngIf="volume" [formGroup]="volume" class="row">
+  <mat-form-field class="column" appearance="outline" id="type">
+    <mat-label>{{ 'common.type' | translate }}</mat-label>
+    <mat-select formControlName="type">
+      <mat-option *ngIf="defaultStorageClass" value="New">
+        {{ 'jupyter.volume.optNew' | translate }}
+      </mat-option>
+      <mat-option value="Existing">
+        {{ 'jupyter.volume.optExisting' | translate }}
+      </mat-option>
+    </mat-select>
+  </mat-form-field>
+
+  <!-- Volume Name Input -->
+  <lib-name-input
+    class="column"
+    [nameControl]="volume.get('name')"
+    id="name"
+  ></lib-name-input>
+
+  <!-- Size Input -->
+  <lib-positive-number-input
+    id="size"
+    class="column"
+    min="1"
+    step="1"
+    [sizeControl]="volume.get('size')"
+    label="{{ 'jupyter.volume.sizeInGi' | translate }}"
+  ></lib-positive-number-input>
+
+  <!-- Mode Input -->
+  <mat-form-field class="column" appearance="outline" id="mode">
+    <mat-label>{{ 'jupyter.volume.mode' | translate }}</mat-label>
+    <mat-select formControlName="mode">
+      <mat-option value="ReadWriteOnce">
+        {{ 'common.optReadWriteOnce' | translate }}
+      </mat-option>
+      <mat-option value="ReadOnlyMany">
+        {{ 'common.optReadOnlyMany' | translate }}
+      </mat-option>
+      <mat-option value="ReadWriteMany">
+        {{ 'common.optReadWriteMany' | translate }}
+      </mat-option>
+    </mat-select>
+  </mat-form-field>
+
+  <!-- Mount Input -->
+  <mat-form-field class="column" appearance="outline" id="path">
+    <mat-label>{{ 'jupyter.volume.mountPoint' | translate }}</mat-label>
+    <input matInput formControlName="path" />
+  </mat-form-field>
+</div>

@@ -29,7 +29,6 @@ import {html, PolymerElement} from '@polymer/polymer/polymer-element.js';
 import css from './main-page.css';
 import template from './main-page.pug';
 import logo from '../assets/logo.svg';
-import '../assets/anon-user.png';
 
 import './registration-page.js';
 import './namespace-selector.js';
@@ -63,31 +62,22 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
             },
             iframeSrc: String,
             iframePage: {type: String, observer: '_iframePageChanged'},
+            documentationItems: {
+                type: Array,
+                value: [],
+            },
+            quickLinks: {
+                type: Array,
+                value: [],
+            },
             menuLinks: {
                 type: Array,
-                value: [
-                    {
-                        link: '/pipeline/',
-                        text: 'Pipelines',
-                    },
-                    {
-                        link: '/jupyter/',
-                        text: 'Notebook Servers',
-                    },
-                    {
-                        link: '/katib/',
-                        text: 'Katib',
-                    },
-                    {
-                        link: '/metadata/',
-                        text: 'Artifact Store',
-                    },
-                ],
+                value: [],
+                observer: '_menuLinksChanged',
             },
-            sidebarItemIndex: {
-                type: Number,
-                value: 0,
-                observer: '_revertSidebarIndexIfExternal',
+            externalLinks: {
+                type: Array,
+                value: [],
             },
             errorText: {type: String, value: ''},
             buildVersion: {type: String, value: BUILD_VERSION},
@@ -96,6 +86,7 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
             inIframe: {type: Boolean, value: false, readOnly: true},
             hideTabs: {type: Boolean, value: false, readOnly: true},
             hideSidebar: {type: Boolean, value: false, readOnly: true},
+            persistent: {type: Boolean, value: true, readOnly: true},
             hideNamespaces: {type: Boolean, value: false, readOnly: true},
             allNamespaces: {type: Boolean, value: false, readOnly: true},
             notFoundInIframe: {type: Boolean, value: false, readOnly: true},
@@ -124,7 +115,8 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
      */
     static get observers() {
         return [
-            '_routePageChanged(routeData.page)',
+            // eslint-disable-next-line
+            '_routePageChanged(routeData.page,subRouteData.path,routeHash.path)',
         ];
     }
 
@@ -158,6 +150,34 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
     }
 
     /**
+     * Set state for loading registration flow in case no dashboard links exists
+     * @param {Event} ev AJAX-response
+     */
+    _onHasDashboardLinksError(ev) {
+        const error = ((ev.detail.request||{}).response||{}).error ||
+            ev.detail.error;
+        this.showError(error);
+        return;
+    }
+
+    /**
+     * Set state for Central dashboard links
+     * @param {Event} ev AJAX-response
+     */
+    _onHasDashboardLinksResponse(ev) {
+        const {
+            menuLinks,
+            externalLinks,
+            quickLinks,
+            documentationItems,
+        } = ev.detail.response;
+        this.menuLinks = menuLinks || [];
+        this.externalLinks = externalLinks || [];
+        this.quickLinks = quickLinks || [];
+        this.documentationItems = documentationItems || [];
+    }
+
+    /**
      * Set state for loading registration flow in case no workgroup exists
      * @param {Event} ev AJAX-response
      */
@@ -173,9 +193,10 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
      * @param {Event} ev AJAX-response
      */
     _onHasWorkgroupResponse(ev) {
-        const {user, hasWorkgroup, hasAuth} = ev.detail.response;
+        const {user, hasWorkgroup, hasAuth,
+            registrationFlowAllowed} = ev.detail.response;
         this._setIsolationMode(hasAuth ? 'multi-user' : 'single-user');
-        if (hasAuth && !hasWorkgroup) {
+        if (registrationFlowAllowed && hasAuth && !hasWorkgroup) {
             this.user = user;
             this._setRegistrationFlow(true);
         }
@@ -183,10 +204,26 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
     }
 
     /**
+     * Simulate page changed to activate the correct menu link. This callback
+     * is called in response to the async call to /api/dashboard-links that
+     * happens at every page refresh.
+     *
+     * @param {Array} newValue - new menu links
+     */
+    _menuLinksChanged(newValue) {
+        if (newValue) {
+            this._routePageChanged(this.routeData.page, this.subRouteData.path,
+                this.routeHash.path);
+        }
+    }
+
+    /**
      * Handles route changes by evaluating the page path component
      * @param {string} newPage
+     * @param {string} path
+     * @param {string} hashPath
      */
-    _routePageChanged(newPage) {
+    _routePageChanged(newPage, path, hashPath) {
         let isIframe = false;
         let notFoundInIframe = false;
         let hideTabs = true;
@@ -195,32 +232,36 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
         let hideSidebar = false;
 
         switch (newPage) {
+        case 'logout':
+            window.top.location.href = '/logout';
+            break;
         case 'activity':
-            this.sidebarItemIndex = 0;
             this.page = 'activity';
             hideTabs = false;
+            this._setActiveLink(this.$.home);
             break;
         case IFRAME_LINK_PREFIX:
             this.page = 'iframe';
             isIframe = true;
             hideNamespaces = false;
-            this._setActiveMenuLink(this.subRouteData.path);
+            this._setActiveMenuLink(path, hashPath);
             this._setIframeSrc();
             break;
         case 'manage-users':
-            this.sidebarItemIndex = 6;
             this.page = 'manage-users';
             hideTabs = true;
             allNamespaces = true;
-            hideSidebar = true;
+            hideSidebar = false;
+            // need to use the shadowRoot selector instead of this.$ because
+            // this.$ does not contain dynamically created DOM nodes
+            this._setActiveLink(this.shadowRoot.querySelector('#contributors'));
             break;
         case '':
-            this.sidebarItemIndex = 0;
             this.page = 'dashboard';
             hideTabs = false;
+            this._setActiveLink(this.$.home);
             break;
         default:
-            this.sidebarItemIndex = -1;
             this.page = 'not_found';
             // Handles case when an iframed page requests an invalid route
             if (this._isInsideOfIframe()) {
@@ -235,13 +276,27 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
         this._setHideSidebar(hideSidebar);
 
         // If iframe <-> [non-frame OR other iframe]
-        if (hideSidebar || isIframe !== this.inIframe || isIframe) {
+        if (!this.persistent || hideSidebar || isIframe !== this.inIframe) {
             this.$.MainDrawer.close();
         }
 
         if (!isIframe) {
             this.iframeSrc = 'about:blank';
         }
+    }
+
+    _buildHref(href, queryParamsChange) {
+        // The "queryParams" value from "queryParamsChange" is not updated as
+        // expected in the "iframe-link", but it works in anchor element.
+        // A temporary workaround is  to use "this.queryParams" as an input
+        // instead of "queryParamsChange.base".
+        // const queryParams = queryParamsChange.base;
+        const queryParams = this.queryParams;
+        if (!queryParams || !queryParams["ns"]) {
+            return this.buildHref(href, this.queryParams);
+        }
+        return this.buildHref(href.replace('{ns}', queryParams["ns"]),
+                              queryParams);
     }
 
     /**
@@ -262,8 +317,15 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
      * @param {string} newPage - iframe page path
      */
     _iframePageChanged(newPage) {
-        window.history.replaceState(null, null,
-            `/${IFRAME_LINK_PREFIX}${newPage}`);
+        const l = new URL(`${IFRAME_LINK_PREFIX}${newPage}`
+            , window.location.origin);
+        for (const key in this.queryParams) {
+            if (this.queryParams.hasOwnProperty(key)) {
+                l.searchParams.append(key, this.queryParams[key]);
+            }
+        }
+        window.history.replaceState(null, null, l.toString());
+        this.set('routeHash.path', window.location.hash.substr(1));
     }
 
     /**
@@ -277,29 +339,70 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
     }
 
     /**
-     * Revert the sidebar index if the item clicked is an external link
-     * @param {int} curr
-     * @param {int} old
-     */
-    _revertSidebarIndexIfExternal(curr, old=0) {
-        if (curr <= this.menuLinks.length + 2) return;
-        this.sidebarItemIndex = old;
-    }
-
-    /**
      * Tries to determine which menu link to activate based on the provided
      * path.
      * @param {string} path
+     * @param {string} hashPath
      */
-    _setActiveMenuLink(path) {
-        const menuLinkIndex = this.menuLinks
-            .findIndex((m) => path.startsWith(m.link));
-        if (menuLinkIndex >= 0) {
-            // Adds 1 since Overview is hard-coded
-            this.sidebarItemIndex = menuLinkIndex + 1;
+    _setActiveMenuLink(path, hashPath) {
+        const htmlElements = this._clearActiveLink();
+        let matchPath = path;
+        let matchingLink = '';
+        const allLinks = this.menuLinks.map((m) => {
+            return m.type === 'section' ? m.items.map((x) => x.link) : m.link;
+        }).flat().sort().map((m) => {
+            // replace namespaced menu items
+            const queryParams = this.queryParams
+            if (!queryParams || !queryParams["ns"]) {
+                return m;
+            }
+            return m.replace('{ns}', queryParams["ns"]);
+        });
+        if (hashPath) {
+            matchPath = path + '#' + hashPath;
+            matchingLink = allLinks
+                .find((l) => this.compareLinks(l, matchPath));
         } else {
-            this.sidebarItemIndex = -1;
+            // longest prefix match - allLinks is sorted
+            allLinks.forEach((link) => {
+                matchingLink = path.startsWith(link) ? link : matchingLink;
+            });
         }
+        // find the HTML element that references the active link
+        const activeMenuEl = Array.from(htmlElements).find(
+            (x) => this.compareLinks(x.parentElement.href, matchingLink));
+        if (activeMenuEl) {
+            // in case the item is a section item, open its section
+            activeMenuEl.parentElement.parentElement.opened = true;
+            activeMenuEl.classList.add('iron-selected');
+        }
+    }
+
+    _setActiveLink(elemRef) {
+        this._clearActiveLink();
+        if (elemRef) {
+            elemRef.classList.add('iron-selected');
+        }
+    }
+
+    _clearActiveLink() {
+        const htmlElements = this.shadowRoot.querySelectorAll(
+            '.menu-item:not(.section-item)');
+        // remove the selection from every menu item
+        htmlElements.forEach((x) => x.classList.remove('iron-selected'));
+        return htmlElements;
+    }
+
+    compareLinks(link, matchingLink) {
+        const url = new URL(link, window.location.origin);
+        const matchingUrl = new URL(matchingLink, window.location.origin);
+        return url.pathname.replace(/\/$/, '')
+            === matchingUrl.pathname.replace(/\/$/, '')
+            && matchingUrl.hash.startsWith(url.hash);
+    }
+
+    _toggleMenuSection(e) {
+        e.target.nextElementSibling.toggle();
     }
 
     /**
@@ -333,6 +436,8 @@ export class MainPage extends utilitiesMixin(PolymerElement) {
         if (kVer && kVer != 'unknown') {
             this.buildVersion = this.platformInfo.kubeflowVersion;
         }
+        // trigger template render
+        this.menuLinks = JSON.parse(JSON.stringify(this.menuLinks));
     }
 }
 

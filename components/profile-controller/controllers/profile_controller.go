@@ -19,30 +19,39 @@ package controllers
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"os"
 	"reflect"
 	"time"
 
-	"github.com/ghodss/yaml"
-	"k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
 	"github.com/cenkalti/backoff"
+	"github.com/fsnotify/fsnotify"
+	"github.com/ghodss/yaml"
 	"github.com/go-logr/logr"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	istiorbac "github.com/kubeflow/kubeflow/components/profile-controller/api/istiorbac/v1alpha1"
 	profilev1 "github.com/kubeflow/kubeflow/components/profile-controller/api/v1"
+	"github.com/pkg/errors"
+	istioSecurity "istio.io/api/security/v1beta1"
+	istioSecurityClient "istio.io/client-go/pkg/apis/security/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/runtime/inject"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
-const SERVICEROLEISTIO = "ns-access-istio"
-const SERVICEROLEBINDINGISTIO = "owner-binding-istio"
+const AUTHZPOLICYISTIO = "ns-owner-access-istio"
+
+// Istio constants
+const ISTIOALLOWALL = "allow-all"
 
 const KFQUOTA = "kf-resource-quota"
 const PROFILEFINALIZER = "profile-finalizer"
@@ -62,11 +71,6 @@ const (
 	istioInjectionLabel = "istio-injection"
 )
 
-var kubeflowNamespaceLabels = map[string]string{
-	"katib-metricscollector-injection":      "enabled",
-	"serving.kubeflow.org/inferenceservice": "enabled",
-}
-
 const DEFAULT_EDITOR = "default-editor"
 const DEFAULT_VIEWER = "default-viewer"
 
@@ -81,31 +85,34 @@ type Plugin interface {
 // ProfileReconciler reconciles a Profile object
 type ProfileReconciler struct {
 	client.Client
-	Scheme           *runtime.Scheme
-	Log              logr.Logger
-	UserIdHeader     string
-	UserIdPrefix     string
-	WorkloadIdentity string
+	Scheme                     *runtime.Scheme
+	Log                        logr.Logger
+	UserIdHeader               string
+	UserIdPrefix               string
+	WorkloadIdentity           string
+	DefaultNamespaceLabelsPath string
 }
+
+// +kubebuilder:rbac:groups=core,resources=namespaces,verbs="*"
+// +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs="*"
+// +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs="*"
+// +kubebuilder:rbac:groups=security.istio.io,resources=authorizationpolicies,verbs="*"
+// +kubebuilder:rbac:groups=kubeflow.org,resources=profiles;profiles/status;profiles/finalizers,verbs="*"
 
 // Reconcile reads that state of the cluster for a Profile object and makes changes based on the state read
 // and what is in the Profile.Spec
 // Automatically generate RBAC rules to allow the Controller to read and write Deployments
-// +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=core,resources=serviceaccount,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=rbac,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kubeflow.org,resources=profiles,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=kubeflow.org,resources=profiles/status,verbs=get;update;patch
 func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	logger := r.Log.WithValues("profile", request.NamespacedName)
+	defaultKubeflowNamespaceLabels := r.readDefaultLabelsFromFile(r.DefaultNamespaceLabelsPath)
 
 	// Fetch the Profile instance
 	instance := &profilev1.Profile{}
 	logger.Info("Start to Reconcile.", "namespace", request.Namespace, "name", request.Name)
 	err := r.Get(ctx, request.NamespacedName, instance)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			// Object not found, return.  Created objects are automatically garbage collected.
 			// For additional cleanup logic use finalizers.
 			IncRequestCounter("profile deletion")
@@ -128,7 +135,8 @@ func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error)
 			Name: instance.Name,
 		},
 	}
-	updateNamespaceLabels(ns)
+	setNamespaceLabels(ns, defaultKubeflowNamespaceLabels)
+	logger.Info("List of labels to be added to namespace", "labels", ns.Labels)
 	if err := controllerutil.SetControllerReference(instance, ns, r.Scheme); err != nil {
 		IncRequestErrorCounter("error setting ControllerReference", SEVERITY_MAJOR)
 		logger.Error(err, "error setting ControllerReference")
@@ -137,7 +145,7 @@ func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error)
 	foundNs := &corev1.Namespace{}
 	err = r.Get(ctx, types.NamespacedName{Name: ns.Name}, foundNs)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("Creating Namespace: " + ns.Name)
 			err = r.Create(ctx, ns)
 			if err != nil {
@@ -167,7 +175,13 @@ func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error)
 		// Check exising namespace ownership before move forward
 		owner, ok := foundNs.Annotations["owner"]
 		if ok && owner == instance.Spec.Owner.Name {
-			if updated := updateNamespaceLabels(foundNs); updated {
+			oldLabels := map[string]string{}
+			for k, v := range foundNs.Labels {
+				oldLabels[k] = v
+			}
+			setNamespaceLabels(foundNs, defaultKubeflowNamespaceLabels)
+			logger.Info("List of labels to be added to found namespace", "labels", ns.Labels)
+			if !reflect.DeepEqual(oldLabels, foundNs.Labels) {
 				err = r.Update(ctx, foundNs)
 				if err != nil {
 					IncRequestErrorCounter("error updating namespace label", SEVERITY_MAJOR)
@@ -184,11 +198,11 @@ func (r *ProfileReconciler) Reconcile(request ctrl.Request) (ctrl.Result, error)
 		}
 	}
 
-	// Update Istio Rbac
-	// Create Istio ServiceRole and ServiceRoleBinding in target namespace; which will give ns owner permission to access services in ns.
-	if err = r.updateIstioRbac(instance); err != nil {
-		logger.Error(err, "error Updating Istio rbac permission", "namespace", instance.Name)
-		IncRequestErrorCounter("error updating Istio rbac permission", SEVERITY_MAJOR)
+	// Update Istio AuthorizationPolicy
+	// Create Istio AuthorizationPolicy in target namespace, which will give ns owner permission to access services in ns.
+	if err = r.updateIstioAuthorizationPolicy(instance); err != nil {
+		logger.Error(err, "error Updating Istio AuthorizationPolicy permission", "namespace", instance.Name)
+		IncRequestErrorCounter("error updating Istio AuthorizationPolicy permission", SEVERITY_MAJOR)
 		return reconcile.Result{}, err
 	}
 
@@ -321,109 +335,189 @@ func (r *ProfileReconciler) appendErrorConditionAndReturn(ctx context.Context, i
 	return reconcile.Result{}, nil
 }
 
+// ProfileMapper maps an event to a reconciliation of all existing Profiles.
+type ProfileMapper struct {
+	client client.Client
+	logger logr.Logger
+}
+
+var _ inject.Client = (*ProfileMapper)(nil)
+
+func (i *ProfileMapper) InjectClient(c client.Client) error {
+	i.client = c
+	return nil
+}
+
+var _ inject.Logger = (*ProfileMapper)(nil)
+
+func (i *ProfileMapper) InjectLogger(l logr.Logger) error {
+	i.logger = l
+	return nil
+}
+
+func (i *ProfileMapper) Map(a handler.MapObject) []reconcile.Request {
+	req := []reconcile.Request{}
+	profileList := &profilev1.ProfileList{}
+	err := i.client.List(context.TODO(), profileList)
+	if err != nil {
+		i.logger.Error(err, "Failed to list profiles in order to trigger reconciliation")
+		return req
+	}
+	for _, p := range profileList.Items {
+		req = append(req, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Name:      p.Name,
+				Namespace: p.Namespace,
+			}})
+	}
+	return req
+}
+
 func (r *ProfileReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Watch config file with namespace labels. If the file changes, trigger
+	// a reconciliation for all Profiles.
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return errors.Wrap(err, "Failed to start file watcher")
+	}
+	if err := watcher.Add(r.DefaultNamespaceLabelsPath); err != nil {
+		return errors.Wrapf(err, "Failed to watch file %s", r.DefaultNamespaceLabelsPath)
+	}
+	events := make(chan event.GenericEvent)
+	go func(watcher *fsnotify.Watcher, reconcileEvents chan event.GenericEvent) {
+		defer watcher.Close()
+		for {
+			select {
+			case fsEvent := <-watcher.Events:
+				if fsEvent.Op != fsnotify.Remove && fsEvent.Op != fsnotify.Write {
+					break
+				}
+				// ConfigMaps work with symlinks. See:
+				// https://martensson.io/go-fsnotify-and-kubernetes-configmaps/
+				if fsEvent.Op == fsnotify.Remove {
+					watcher.Remove(fsEvent.Name)
+					watcher.Add(r.DefaultNamespaceLabelsPath)
+				}
+				reconcileEvents <- event.GenericEvent{}
+			case err := <-watcher.Errors:
+				r.Log.Error(err, "Error while watching config file", "path",
+					r.DefaultNamespaceLabelsPath)
+			}
+		}
+	}(watcher, events)
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&profilev1.Profile{}).
-		Owns(&istiorbac.ServiceRole{}).
-		Owns(&istiorbac.ServiceRoleBinding{}).
 		Owns(&corev1.Namespace{}).
+		Owns(&istioSecurityClient.AuthorizationPolicy{}).
 		Owns(&corev1.ServiceAccount{}).
 		Owns(&rbacv1.RoleBinding{}).
+		Watches(
+			&source.Channel{Source: events},
+			&handler.EnqueueRequestsFromMapFunc{
+				ToRequests: &ProfileMapper{},
+			},
+		).
 		Complete(r)
 }
 
-// updateIstioRbac create or update Istio rbac resources in target namespace owned by "profileIns". The goal is to allow service access for profile owner
-func (r *ProfileReconciler) updateIstioRbac(profileIns *profilev1.Profile) error {
+func (r *ProfileReconciler) getAuthorizationPolicy(profileIns *profilev1.Profile) istioSecurity.AuthorizationPolicy {
+	return istioSecurity.AuthorizationPolicy{
+		Action: istioSecurity.AuthorizationPolicy_ALLOW,
+		// Empty selector == match all workloads in namespace
+		Selector: nil,
+		Rules: []*istioSecurity.Rule{
+			{
+				When: []*istioSecurity.Condition{
+					{
+						// Namespace Owner can access all workloads in the
+						// namespace
+						Key: fmt.Sprintf("request.headers[%v]", r.UserIdHeader),
+						Values: []string{
+							r.UserIdPrefix + profileIns.Spec.Owner.Name,
+						},
+					},
+				},
+			},
+			{
+				When: []*istioSecurity.Condition{
+					{
+						// Workloads in the same namespace can access all other
+						// workloads in the namespace
+						Key:    fmt.Sprintf("source.namespace"),
+						Values: []string{profileIns.Name},
+					},
+				},
+			},
+			{
+				To: []*istioSecurity.Rule_To{
+					{
+						Operation: &istioSecurity.Operation{
+							// Workloads pathes should be accessible for KNative's
+							// `activator` and `controller` probes
+							// See: https://knative.dev/docs/serving/istio-authorization/#allowing-access-from-system-pods-by-paths
+							Paths: []string{
+								"/healthz",
+								"/metrics",
+								"/wait-for-drain",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+// updateIstioAuthorizationPolicy create or update Istio AuthorizationPolicy
+// resources in target namespace owned by "profileIns". The goal is to allow
+// service access for profile owner.
+func (r *ProfileReconciler) updateIstioAuthorizationPolicy(profileIns *profilev1.Profile) error {
 	logger := r.Log.WithValues("profile", profileIns.Name)
-	istioServiceRole := &istiorbac.ServiceRole{
+
+	istioAuth := &istioSecurityClient.AuthorizationPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{USER: profileIns.Spec.Owner.Name, ROLE: ADMIN},
-			Name:        SERVICEROLEISTIO,
+			Name:        AUTHZPOLICYISTIO,
 			Namespace:   profileIns.Name,
 		},
-		Spec: istiorbac.ServiceRoleSpec{
-			Rules: []*istiorbac.AccessRule{
-				{
-					Services: []string{"*"},
-				},
-			},
-		},
-	}
-	if err := controllerutil.SetControllerReference(profileIns, istioServiceRole, r.Scheme); err != nil {
-		return err
-	}
-	foundSr := &istiorbac.ServiceRole{}
-	err := r.Get(context.TODO(), types.NamespacedName{Name: istioServiceRole.Name,
-		Namespace: istioServiceRole.Namespace}, foundSr)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("Creating Istio ServiceRole", "namespace", istioServiceRole.Namespace,
-				"name", istioServiceRole.Name)
-			err = r.Create(context.TODO(), istioServiceRole)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
-		if !reflect.DeepEqual(istioServiceRole.Spec, foundSr.Spec) {
-			foundSr.Spec = istioServiceRole.Spec
-			logger.Info("Updating Istio ServiceRole", "namespace", istioServiceRole.Namespace,
-				"name", istioServiceRole.Name)
-			err = r.Update(context.TODO(), foundSr)
-			if err != nil {
-				return err
-			}
-		}
-	}
-	istioServiceRoleBinding := &istiorbac.ServiceRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Annotations: map[string]string{USER: profileIns.Spec.Owner.Name, ROLE: ADMIN},
-			Name:        SERVICEROLEBINDINGISTIO,
-			Namespace:   profileIns.Name,
-		},
-		Spec: istiorbac.ServiceRoleBindingSpec{
-			Subjects: []*istiorbac.Subject{
-				{
-					Properties: map[string]string{fmt.Sprintf("request.headers[%v]", r.UserIdHeader): r.UserIdPrefix + profileIns.Spec.Owner.Name},
-				},
-			},
-			RoleRef: &istiorbac.RoleRef{
-				Kind: "ServiceRole",
-				Name: SERVICEROLEISTIO,
-			},
-		},
-	}
-	if err := controllerutil.SetControllerReference(profileIns, istioServiceRoleBinding, r.Scheme); err != nil {
-		return err
-	}
-	foundSrb := &istiorbac.ServiceRoleBinding{}
-	err = r.Get(context.TODO(), types.NamespacedName{Name: istioServiceRoleBinding.Name,
-		Namespace: istioServiceRoleBinding.Namespace}, foundSrb)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.Info("Creating Istio ServiceRoleBinding", "namespace", istioServiceRoleBinding.Namespace,
-				"name", istioServiceRoleBinding.Name)
-			err = r.Create(context.TODO(), istioServiceRoleBinding)
-			if err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
-	} else {
-		if !reflect.DeepEqual(istioServiceRoleBinding.Spec, foundSrb.Spec) {
-			foundSrb.Spec = istioServiceRoleBinding.Spec
-			logger.Info("Updating Istio ServiceRoleBinding", "namespace", istioServiceRoleBinding.Namespace,
-				"name", istioServiceRoleBinding.Name)
-			err = r.Update(context.TODO(), foundSrb)
-			if err != nil {
-				return err
-			}
-		}
+		Spec: r.getAuthorizationPolicy(profileIns),
 	}
 
+	if err := controllerutil.SetControllerReference(profileIns, istioAuth, r.Scheme); err != nil {
+		return err
+	}
+	foundAuthorizationPolicy := &istioSecurityClient.AuthorizationPolicy{}
+	err := r.Get(
+		context.TODO(),
+		types.NamespacedName{
+			Name:      istioAuth.ObjectMeta.Name,
+			Namespace: istioAuth.ObjectMeta.Namespace,
+		},
+		foundAuthorizationPolicy,
+	)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			logger.Info("Creating Istio AuthorizationPolicy", "namespace", istioAuth.ObjectMeta.Namespace,
+				"name", istioAuth.ObjectMeta.Name)
+			err = r.Create(context.TODO(), istioAuth)
+			if err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
+	} else {
+		if !reflect.DeepEqual(istioAuth, foundAuthorizationPolicy) {
+			foundAuthorizationPolicy.Spec = istioAuth.Spec
+			logger.Info("Updating Istio AuthorizationPolicy", "namespace", istioAuth.ObjectMeta.Namespace,
+				"name", istioAuth.ObjectMeta.Name)
+			err = r.Update(context.TODO(), foundAuthorizationPolicy)
+			if err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }
 
@@ -438,7 +532,7 @@ func (r *ProfileReconciler) updateResourceQuota(profileIns *profilev1.Profile,
 	found := &corev1.ResourceQuota{}
 	err := r.Get(ctx, types.NamespacedName{Name: resourceQuota.Name, Namespace: resourceQuota.Namespace}, found)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("Creating ResourceQuota", "namespace", resourceQuota.Namespace, "name", resourceQuota.Name)
 			err = r.Create(ctx, resourceQuota)
 			if err != nil {
@@ -476,7 +570,7 @@ func (r *ProfileReconciler) updateServiceAccount(profileIns *profilev1.Profile, 
 	found := &corev1.ServiceAccount{}
 	err := r.Get(context.TODO(), types.NamespacedName{Name: serviceAccount.Name, Namespace: serviceAccount.Namespace}, found)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("Creating ServiceAccount", "namespace", serviceAccount.Namespace,
 				"name", serviceAccount.Name)
 			err = r.Create(context.TODO(), serviceAccount)
@@ -519,7 +613,7 @@ func (r *ProfileReconciler) updateRoleBinding(profileIns *profilev1.Profile,
 	found := &rbacv1.RoleBinding{}
 	err := r.Get(context.TODO(), types.NamespacedName{Name: roleBinding.Name, Namespace: roleBinding.Namespace}, found)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			logger.Info("Creating RoleBinding", "namespace", roleBinding.Namespace, "name", roleBinding.Name)
 			err = r.Create(context.TODO(), roleBinding)
 			if err != nil {
@@ -552,6 +646,8 @@ func (r *ProfileReconciler) GetPluginSpec(profileIns *profilev1.Profile) ([]Plug
 		switch p.Kind {
 		case KIND_WORKLOAD_IDENTITY:
 			pluginIns = &GcpWorkloadIdentity{}
+		case KIND_AWS_IAM_FOR_SERVICE_ACCOUNT:
+			pluginIns = &AwsIAMForServiceAccount{}
 		default:
 			logger.Info("Plugin not recgonized: ", "Kind", p.Kind)
 			continue
@@ -621,16 +717,40 @@ func removeString(slice []string, s string) (result []string) {
 	return
 }
 
-func updateNamespaceLabels(ns *corev1.Namespace) bool {
-	updated := false
+func setNamespaceLabels(ns *corev1.Namespace, newLabels map[string]string) {
 	if ns.Labels == nil {
 		ns.Labels = make(map[string]string)
 	}
-	for k, v := range kubeflowNamespaceLabels {
-		if _, ok := ns.Labels[k]; !ok {
-			ns.Labels[k] = v
-			updated = true
+
+	for k, v := range newLabels {
+		_, ok := ns.Labels[k]
+		if len(v) == 0 {
+			// When there is an empty value, k should be removed.
+			if ok {
+				delete(ns.Labels, k)
+			}
+		} else {
+			if !ok {
+				// Add label if not exist, otherwise skipping update.
+				ns.Labels[k] = v
+			}
 		}
 	}
-	return updated
+}
+
+func (r *ProfileReconciler) readDefaultLabelsFromFile(path string) map[string]string {
+	logger := r.Log.WithName("read-config-file").WithValues("path", path)
+	dat, err := ioutil.ReadFile(path)
+	if err != nil {
+		logger.Error(err, "namespace labels properties file doesn't exist")
+		os.Exit(1)
+	}
+
+	labels := map[string]string{}
+	err = yaml.Unmarshal(dat, &labels)
+	if err != nil {
+		logger.Error(err, "Unable to parse default namespace labels.")
+		os.Exit(1)
+	}
+	return labels
 }

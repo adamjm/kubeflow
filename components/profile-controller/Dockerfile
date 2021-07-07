@@ -1,5 +1,5 @@
 # Build the manager binary
-ARG GOLANG_VERSION=1.12.5
+ARG GOLANG_VERSION=1.15
 FROM golang:${GOLANG_VERSION} as builder
 
 WORKDIR /workspace
@@ -14,6 +14,7 @@ RUN go mod download
 COPY main.go main.go
 COPY api/ api/
 COPY controllers/ controllers/
+RUN cp /bin/dash /workspace/dash
 
 # Build
 RUN if [ "$(uname -m)" = "aarch64" ]; then \
@@ -26,6 +27,8 @@ RUN if [ "$(uname -m)" = "aarch64" ]; then \
 # Refer to https://github.com/GoogleContainerTools/distroless for more details
 FROM gcr.io/distroless/base:latest as serve
 WORKDIR /
+COPY --from=builder /workspace/dash /bin/dash
+
 COPY third_party third_party
 COPY --from=builder /workspace/manager .
 COPY --from=builder /go/pkg/mod/github.com/hashicorp third_party/library/

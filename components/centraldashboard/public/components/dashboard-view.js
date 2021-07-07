@@ -15,10 +15,10 @@ import './notebooks-card.js';
 import './pipelines-card.js';
 import './resource-chart.js';
 import {getGCPData} from './resources/cloud-platform-data.js';
+import utilitiesMixin from './utilities-mixin.js';
 
-const DOCS = 'https://www.kubeflow.org/docs';
 
-export class DashboardView extends PolymerElement {
+export class DashboardView extends utilitiesMixin(PolymerElement) {
     static get template() {
         return html([`
             <style include="card-styles">
@@ -33,81 +33,11 @@ export class DashboardView extends PolymerElement {
      */
     static get properties() {
         return {
-            documentationItems: {
-                type: Array,
-                value: [
-                    {
-                        text: 'Getting Started with Kubeflow',
-                        desc: 'Get your machine-learning workflow up and ' +
-                            'running on Kubeflow',
-                        link: `${DOCS}/started/getting-started/`,
-                    },
-                    {
-                        text: 'MiniKF',
-                        desc: 'A fast and easy way to deploy Kubeflow locally',
-                        link: `${DOCS}/started/getting-started-minikf/`,
-                    },
-                    {
-                        text: 'Microk8s for Kubeflow',
-                        desc: 'Quickly get Kubeflow running locally on ' +
-                            'native hypervisors',
-                        link: `${DOCS}/started/getting-started-multipass/`,
-                    },
-                    {
-                        text: 'Minikube for Kubeflow',
-                        desc: 'Quickly get Kubeflow running locally',
-                        link: `${DOCS}/started/getting-started-minikube/`,
-                    },
-                    {
-                        text: 'Kubeflow on GCP',
-                        desc: 'Running Kubeflow on Kubernetes Engine and ' +
-                            'Google Cloud Platform',
-                        link: `${DOCS}/gke/`,
-                    },
-                    {
-                        text: 'Kubeflow on AWS',
-                        desc: 'Running Kubeflow on Elastic Container Service ' +
-                            'and Amazon Web Services',
-                        link: `${DOCS}/aws/`,
-                    },
-                    {
-                        text: 'Requirements for Kubeflow',
-                        desc: 'Get more detailed information about using ' +
-                'Kubeflow and its components',
-                        link: `${DOCS}/started/requirements/`,
-                    },
-                ],
-            },
-            namespace: String,
-            quickLinks: {
-                type: Array,
-                value: [
-                    {
-                        text: 'Upload a pipeline',
-                        desc: 'Pipelines',
-                        link: `/pipeline/`,
-                    },
-                    {
-                        text: 'View all pipeline runs',
-                        desc: 'Pipelines',
-                        link: `/pipeline/#/runs`,
-                    },
-                    {
-                        text: 'Create a new Notebook server',
-                        desc: 'Notebook Servers',
-                        link: `/jupyter/new?namespace=kubeflow`,
-                    },
-                    {
-                        text: 'View Katib Studies',
-                        desc: 'Katib',
-                        link: `/katib/`,
-                    },
-                    {
-                        text: 'View Metadata Artifacts',
-                        desc: 'Artifact Store',
-                        link: `/metadata/`,
-                    },
-                ],
+            documentationItems: Array,
+            quickLinks: Array,
+            namespace: {
+                type: Object,
+                observer: '_namespaceChanged',
             },
             platformDetails: Object,
             platformInfo: {
@@ -130,6 +60,20 @@ export class DashboardView extends PolymerElement {
             }
             this.platformDetails = getGCPData(gcpProject);
         }
+    }
+
+    /**
+     * Rewrites the links adding the namespace as a query parameter.
+     * @param {namespace} namespace
+     */
+    _namespaceChanged(namespace) {
+        this.quickLinks.map((quickLink) => {
+            quickLink.link = this.buildHref(quickLink.link, {ns: namespace});
+            return quickLink;
+        });
+        // We need to deep-copy and re-assign in order to trigger the
+        // re-rendering of the component
+        this.quickLinks = JSON.parse(JSON.stringify(this.quickLinks));
     }
 }
 
