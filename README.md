@@ -1,15 +1,41 @@
-<img src="https://www.kubeflow.org/images/logo.svg" width="100">
-Kubeflow is a Cloud Native platform for machine learning based on Google’s internal machine learning pipelines.
+# Kubeflow
 
----
-Please refer to the official docs at [kubeflow.org](http://kubeflow.org).
+[![Join Kubeflow Slack](https://img.shields.io/badge/slack-join_chat-white.svg?logo=slack&style=social)](https://www.kubeflow.org/docs/about/community/#kubeflow-slack-channels)
 
+<img src="./logo/stacked.svg" width="120">
 
-## Quick Links
-* [Prow test dashboard](https://k8s-testgrid.appspot.com/sig-big-data)
-* [Prow jobs dashboard](https://prow.k8s.io/?repo=kubeflow%2Fkubeflow)
-* [Argo UI for E2E tests](http://testing-argo.kubeflow.org)
+## What is Kubeflow
 
-## Get Involved
-Please refer to the [Community](https://www.kubeflow.org/docs/about/community/) page.
+[Kubeflow](https://www.kubeflow.org/) is the foundation of tools for AI Platforms on Kubernetes.
 
+AI platform teams can build on top of Kubeflow by using each subproject independently or deploying
+the entire Kubeflow Community Distribution to meet their specific needs.
+The Kubeflow Community Distribution is composable, modular, portable, and scalable, backed by an
+ecosystem of Kubernetes-native projects that cover every stage of
+[the AI lifecycle](https://www.kubeflow.org/docs/started/architecture/#kubeflow-landscape-in-the-ai-lifecycle).
+
+Whether you’re an AI practitioner, a platform administrator, or a team of developers,
+Kubeflow offers modular, scalable, and extensible tools to support your AI use cases.
+
+Kubeflow consists of Kubeflow Subprojects, Kubeflow Ecosystem, Kubeflow Packaged Distribution,
+and Kubeflow Community Distribution.
+
+Check out [the official documentation](https://www.kubeflow.org/docs/started/introduction/) for
+more detailed information.
+
+## Repository Role
+
+This repository serves primarily as a gateway to Kubeflow subprojects and shared project metadata.
+Kubeflow development happens in the individual subproject repositories.
+
+## Kubeflow Community
+
+Kubeflow is a community-led project maintained by the
+[Kubeflow Working Groups](https://www.kubeflow.org/docs/about/governance/#5-working-groups)
+under the guidance of the
+[Kubeflow Outreach Committee](https://www.kubeflow.org/docs/about/governance/#3-kubeflow-outreach-committee),
+[Kubeflow Distribution Committee](https://www.kubeflow.org/docs/about/governance/#4-kubeflow-distribution-committee),
+and [Kubeflow Steering Committee](https://www.kubeflow.org/docs/about/governance/#2-kubeflow-steering-committee).
+
+We encourage you to learn about the [Kubeflow Community](https://www.kubeflow.org/docs/about/community/)
+and how to [contribute](https://www.kubeflow.org/docs/about/contributing/) to the project!

@@ -1,8 +1,15 @@
 # We want to rely on fine grained OWNERs files.
 # Approvers listed here is just a backup in case someone is out.
 approvers:
-  - abhi-g
-  - jlewi
-  - kunmingg
-  - pdmack
-  - richardsliu
+  - andreyvelich
+  - chasecadet
+  - franciscojavierarceo
+  - juliusvonkohout 
+  - thesuperzapper
+  - zijianjoy
+
+emeritus_approvers:
+  - james-jwu
+  - jbottum
+  - johnugeorge
+  - terrytangyuan
